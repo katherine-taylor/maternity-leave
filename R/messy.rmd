@@ -1,0 +1,185 @@
+---
+title: Raw Maternity Leave Analysis
+author: Katherine Taylor
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# options
+knitr::opts_chunk$set(echo = TRUE)
+options(tidyverse.quiet = TRUE)
+options(gt.quiet = TRUE)
+
+# seed
+set.seed(91006)
+# libraries
+library(tidyverse)
+library(janitor)
+library(here)
+library(hrbrthemes)
+library(modelsummary)
+library(gt)
+#hrbrthemes::import_roboto_condensed()
+
+# global settings
+gof_stuff <- tribble(
+  ~raw, ~clean, ~fmt,
+  "nobs", "N", 0,
+  "r.squared", "R²", 3
+)
+```
+
+# Data Cleaning
+```{r read_in_data}
+mat_health_raw <-
+  read_csv(here("data/raw_data/maternal_health_outcomes.csv")) |> clean_names()
+mat_leave_raw <-
+  read_csv(here("data/raw_data/maternity_leave_raw_data.csv")) |> clean_names()
+```
+
+Checks that I would do 
+- Is the data for every country in weeks?
+- What is the most recent year in the data, is it all the same?
+- Are the columns sex and sex_2 and time and time_2 the same? If not, why are they different?
+- Is there the same number of countries before and after the filter?
+
+```{r data_checks}
+length(unique(mat_leave_raw$country))
+```
+
+```{r clean_leave_data}
+mat_leave_clean <- mat_leave_raw |>
+  filter(indicator == "Length of maternity leave" &
+           sex == "WOMEN") |>
+  group_by(country) |>
+  filter(cou != "OAVG") |>
+  ungroup()
+```
+
+```{r post_cleaning_checks}
+# should be raw - 1 since I'm removing the average point
+length(unique(mat_leave_clean$country))
+
+# look for outliers in the maternity leave value column
+ggplot(mat_leave_clean, aes(x = value)) +
+  geom_density() +
+  theme_ipsum()
+```
+
+```{r get_countries_list}
+countries <- mat_leave_clean |> select(country, time) |> unique()
+```
+
+```{r clean_outcomes_data}
+mat_health_clean <- mat_health_raw |>
+  filter(time_period_time_period %in% countries$time) |>
+  mutate(
+    country_cleaned = str_trim(str_remove_all(ref_area_geographic_area, "^[^*]*:")),
+    time = parse_number(time_period_time_period)
+  ) |>
+  filter(country_cleaned %in% countries$country)
+
+final_countries <-
+  data.frame("country" = unique(mat_health_clean$country_cleaned),
+             "num" = 1:34)
+```
+
+```{r final_df}
+mat_df <- mat_leave_clean |>
+  left_join(mat_health_clean,
+            by = c("country" = "country_cleaned", "time")) |>
+  filter(
+    indicator_indicator == "MNCH_MMR: Maternal mortality ratio (number of maternal deaths per 100,000 live births)" &
+      sex_sex == "F: Female"
+  ) |>
+  select(
+    cou,
+    country,
+    time,
+    value,
+    obs_value_observation_value,
+    unit_measure_unit_of_measure
+  ) |>
+  rename(
+    "year" = "time",
+    "weeks_mat_leave" = "value",
+    "mat_mort_rate" = "obs_value_observation_value",
+    "unit" = "unit_measure_unit_of_measure"
+  ) |>
+  mutate(mat_mort_rate = parse_number(mat_mort_rate),
+         mat_mort_rate = mat_mort_rate / 100000)
+```
+
+```{r save_cleaned_data}
+write_csv(mat_df, here("data/clean_data/maternity_data_cleaned.csv"))
+save(mat_df, file = here("data/clean_data/maternity_data_cleaned.RData"))
+```
+
+# Data Exploration
+```{r}
+skimr::skim(mat_df)
+```
+
+# Data Visualization
+```{r}
+mat_df |> 
+  ggplot(aes(x = weeks_mat_leave, y = mat_mort_rate, color = country)) +
+  geom_point() +
+  facet_grid(~year)
+```
+
+```{r}
+mat_df |> 
+  ggplot(aes(x = year, y = mat_mort_rate, color = country)) +
+  geom_line()
+```
+
+# Linear Model
+```{r}
+model_ols_1 <- lm(mat_mort_rate ~ weeks_mat_leave, data = mat_df)
+model_ols_2 <- lm(mat_mort_rate ~ year, data = mat_df)
+model_ols_3 <-
+  lm(mat_mort_rate ~ weeks_mat_leave + year, data = mat_df)
+```
+
+```{r}
+modelsummary(list(model_ols_1, model_ols_2, model_ols_3), gof_map = gof_stuff, output = "gt")
+```
+
+```{r}
+par(mfrow = c(2,2))
+plot(model_ols_1)
+plot(model_ols_2)
+plot(model_ols_3)
+par(mfrow = c(1,1))
+```
+There are clearly some time related trends that need to be taken care of at some point. Also, the data is nowhere close to fitting a normal distribution. 
+#TODO reread time series book on lagged regression
+
+# GLM Model
+```{r}
+model_frac_logit1 <- glm(mat_mort_rate ~ weeks_mat_leave, data = mat_df,
+                         family = quasibinomial())
+model_frac_logit2 <- glm(mat_mort_rate ~ year, data = mat_df,
+                         family = quasibinomial())
+model_frac_logit3 <- glm(mat_mort_rate ~ weeks_mat_leave + year, data = mat_df,
+                         family = quasibinomial())
+```
+
+```{r}
+modelsummary(list(model_frac_logit1, model_frac_logit2, model_frac_logit3),gof_map = gof_stuff, output = "gt")
+```
+
+```{r}
+summary(model_frac_logit3)
+plot(model_frac_logit3)
+```
+
+# Test adding country to the model
+```{r}
+model_frac_logitc <- glm(mat_mort_rate ~ weeks_mat_leave + year + country, data = mat_df,
+                         family = quasibinomial())
+summary(model_frac_logitc)
+plot(model_frac_logitc)
+```
+
